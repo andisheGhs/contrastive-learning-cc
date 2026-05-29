@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# LaTeX intermediates
+*.aux
+*.log
+*.out
+*.toc
+
+# Run logs (transient)
+*.log
+!docs/*.log
+
+# Datasets — not committed. Download from sources in README.md
+data/*.txt
+data/*.gz
