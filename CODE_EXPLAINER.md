@@ -1,273 +1,186 @@
-# Code explainer — what this codebase does
+# Code Explainer
 
-
-
----
-
-## Level 1 
-
-> The code tests a single claim: that contrastive learning, the SimCLR-style NT-Xent loss, is implicitly solving correlation clustering. So I run the same input — a signed graph with positive and negative edges — through four different clustering algorithms and compare them: Pivot, Local Search, Veldt's MFP, and a contrastive-learning model with k-means readout. I do this on both synthetic graphs (where I control the structure) and real data (Epinions signed network, 20 Newsgroups text). The output is the normalized correlation-clustering cost for each method, and on labeled data also the ARI against ground truth.
+A technical guide to the codebase accompanying *Contrastive Learning as an
+Implicit Solver for Correlation Clustering*. This document defines the
+notation used throughout the repository, walks through each algorithm as
+implemented in the source files, describes the two real-world datasets and
+their cleaning policies, and reports the headline empirical finding.
 
 ---
 
-## Level 2
+## 1. Overview
 
-### The data unit
+The repository tests a single claim: that the SimCLR-style NT-Xent
+contrastive loss is implicitly solving correlation clustering (CC) under a
+triadic-closure assumption. The same input — a signed graph with positive
+and negative edges — is run through four clustering procedures:
 
-A correlation-clustering instance is a graph where every edge has a label:
+1. Pivot (Ailon, Charikar, Newman 2008)
+2. Local Search seeded from Pivot
+3. Veldt's Match-Flip-Pivot (MFP, ICML 2022)
+4. Contrastive Learning (CL): a 3-layer MLP encoder trained with NT-Xent on
+   2-hop positive-neighborhood features, followed by a k-means readout
 
-- `++` — these two nodes should be in the same cluster
-- `--` — these two nodes should be in different clusters
-- *(missing)* — zero-weight, no opinion
+Experiments are run on (a) synthetic graphs in which density, triadic-closure
+violation rate, and positive-edge purity are independently controlled and
+(b) two real-world data sources: the Epinions signed social network and the
+20 Newsgroups text classification benchmark with a similarity-threshold
+graph construction.
 
-A **clustering** is an assignment of each node to a cluster id. The **correlation-clustering cost** is the number of *violated* edges:
-
-- a `++` edge whose endpoints are in different clusters
-- a `--` edge whose endpoints are in the same cluster
-
-Normalized by `|edges|`.
-
-### The four algorithms
-
-All defined in [cc_core.py](cc_core.py) and [cc_baselines.py](cc_baselines.py).
-
-1. **Pivot** — pick a random node, put it and all its `++` neighbors in a cluster, remove them, repeat. Classic 3-approximation (Ailon, Charikar, Newman 2008).
-2. **Local Search** — start from Pivot's output, then for every node, try moving it to each cluster that touches it (or to a new singleton) and keep the move if it lowers cost. Repeat until stable.
-3. **Veldt MFP (Match-Flip-Pivot)** — find all "open wedges" `u-v-w` where `u-v` and `v-w` are `++` but `u-w` is not. Greedily match them, flip `u-w` to `++` to close each matched wedge, then run Pivot on the modified graph. This is the algorithm that *explicitly* uses triadic closure as preprocessing (Veldt, ICML 2022).
-4. **Contrastive Learning (CL)** — build a feature vector per node from its 2-hop positive-neighborhood, train a small 3-layer MLP using the NT-Xent loss with `++` edges as positive pairs and `--` edges as negatives, then run k-means on the resulting embeddings.
-
-### The experiments
-
-The pipeline is identical across all of them — generate or load a graph, run all four methods, measure cost and ARI.
-
-| File | What it varies | What it tests |
-|---|---|---|
-| [cc_core.py](cc_core.py) | E++ density × graph size | Does CL track Pivot as density grows? (Exp 1) |
-| [exp_synthetic.py](exp_synthetic.py) | TC violation rate ε | Does CL collapse uniquely under TC violation? (Exp 2 — the main result) |
-| [exp_purity.py](exp_purity.py) | Positive-edge purity ρ at fixed density | Is purity *necessary but not sufficient* for CL? (Exp 3) |
-| [exp_real_data.py](exp_real_data.py) `--snap epinions` | Subgraph size on Epinions | Does Exp 1 generalize to real signed networks? |
-| [exp_real_data.py](exp_real_data.py) `--uci 20news` | Cosine similarity threshold θ | How does CL behave on text data under varying graph construction? |
-
-### The output
-
-Each script writes a figure to [results/](results/) and (for the synthetic ones) a `.npy` results file. The cleaned Epinions and 20news figures are what we produced in this session:
-
-- [results/epinions_cost_by_size.png](results/epinions_cost_by_size.png)
-- [results/epinions_cl_vs_tc.png](results/epinions_cl_vs_tc.png)
-- [results/20news_threshold_sweep.png](results/20news_threshold_sweep.png)
+All algorithms are defined in [cc_core.py](cc_core.py) and
+[cc_baselines.py](cc_baselines.py); the experiment drivers are in
+[exp_synthetic.py](exp_synthetic.py), [exp_purity.py](exp_purity.py), and
+[exp_real_data.py](exp_real_data.py).
 
 ---
 
-## Level 3 — likely follow-up questions
+## 2. Notation and definitions
 
-### "What's the CL model exactly?"
+### 2.1 Correlation clustering instances
 
-A 3-layer MLP. The input is a 2-hop neighborhood-aggregated feature vector — for each node we average a random projection of its positive 1-hop neighbors, then average those over its positive 2-hop neighbors. Dimensions scale with k: `feat_dim = 4k`, hidden `= 8k`, output `= 4k`. We train with vectorized NT-Xent for 80 epochs, then run k-means on the embeddings.
-
-### "Why scale dimensions with k?"
-
-Spectral clustering principle: separating k clusters needs at least k embedding dimensions. We don't claim novelty there, we just apply it.
-
-### "What's 'triadic closure' (TC) in your terms?"
-
-If `u-v` and `v-w` are both `++`, then `u-w` must not be `--`. It's the structural assumption that positive neighborhoods are transitively consistent. The NT-Xent loss implicitly assumes this because it averages over positive partners.
-
-### "How do you measure TC violation?"
-
-Fraction of `++` wedges `(u, v, w)` whose closing edge `u-w` is `--`. Zero means TC holds; 1.0 means every wedge is violated.
-
-### "What does the real-data experiment add?"
-
-Two things:
-
-(a) **Epinions** confirms on a real signed network that when TC holds (which it does, ~99.5% of wedges), CL is competitive with the combinatorial baselines.
-
-(b) **20 Newsgroups** is a sensitivity test under varying graph construction — it shows CL degrades smoothly as we relax the similarity threshold, while Local Search collapses to trivial all-one-cluster at high θ.
-
-### "Why did the first Epinions run look so bad?"
-
-The ego-network subsampler kept random 2-hop nodes that had no edges inside the kept set. Eighty percent of the "nodes" in those subgraphs were forced singletons, which structurally penalizes any method using a balanced k-clustering readout. After fixing the cleaning — dropping self-loops, dropping reciprocal-disagreement pairs, keeping the center node in the sample, and dropping degree-0 nodes in the kept set — the results align with the synthetic prediction.
-
-### "Why did you pick the best k for CL via a sweep?"
-
-The original code passed `k_est = min(#positive-components, n/5)` to k-means. On Epinions that gave k=40–500, but the CC-cost-optimal k on these graphs is k=2. Pivot/LS/MFP choose their own k from the graph — they don't take it as input. So letting CL sweep over `{2, 5, 10, k_est}` and reporting the min-cost choice is the fair analog: every method gets to pick its own k. We log which k was chosen on every run.
-
-### "What's the headline finding?"
-
-The synthetic story holds on real data when the cleaning is right. Local Search is still the strongest method overall — that's an honest finding we don't hide — but CL is consistently second-best on cleaned Epinions and beats both Pivot and MFP. The paper's contribution is *characterization* — explaining when and why CL works — not a performance claim that CL beats combinatorial CC.
-
----
-
-## File-by-file map
-
-| File | Purpose |
-|---|---|
-| [cc_core.py](cc_core.py) | Synthetic graph generation, CL model (MLP + NT-Xent), Pivot, cost helpers, Exp 1 entry point |
-| [cc_baselines.py](cc_baselines.py) | Local Search and Veldt MFP implementations |
-| [exp_synthetic.py](exp_synthetic.py) | Unified runner for synthetic Experiments 1–4 |
-| [exp_purity.py](exp_purity.py) | Purity-controlled Experiment 3 |
-| [exp_real_data.py](exp_real_data.py) | SNAP (Epinions/Slashdot) and UCI (20news) experiments with cleaning |
-| [diagnose_signed_subgraph.py](diagnose_signed_subgraph.py) | Diagnostic that prints density / component-size / k-sweep on a few ego-networks |
-| [docs/proposition.pdf](docs/proposition.pdf) | The proved bound: NT-Xent minimizer ⇒ minimizer of upper bound on continuous CC relaxation |
-| [results/](results/) | All figures and `.npy` result arrays |
-| [docs/session_report.tex](docs/session_report.tex) / [docs/session_report.pdf](docs/session_report.pdf) | Narrative writeup of the cleaning fix and real-data results |
-
----
-
-# Level 4 — deep dive (read once, refer back as needed)
-
-This section walks through the actual code and defines every term carefully. Read top-to-bottom the first time; use the section headers as an index afterward.
-
-## 4.1 Definitions, in plain English
-
-### What is a "graph" in this project?
-
-A graph here is just a set of nodes (numbered 0, 1, 2, …, n−1) plus a dictionary of labeled edges:
+A correlation clustering instance is a labeled undirected graph stored as a
+Python dictionary:
 
 ```python
 edges = {
-    (0, 1): '++',   # nodes 0 and 1 belong together
-    (0, 2): '--',   # nodes 0 and 2 should be separated
+    (0, 1): '++',   # nodes 0 and 1 should be in the same cluster
+    (0, 2): '--',   # nodes 0 and 2 should be in different clusters
     (1, 5): '++',
-    # pairs not in the dict have no opinion (zero-weight)
+    # pairs not in the dict are zero-weight (no observation)
 }
 ```
 
-The label `'++'` is a positive edge ("same cluster"), `'--'` is a negative edge ("different cluster"). All four algorithms work on this same edge-dict format.
+Each labeled pair `(i, j)` with `i < j` carries one of two signs:
 
-### What is a "clustering"?
+- `'++'` — positive edge: the endpoints should be co-clustered (E⁺⁺)
+- `'--'` — negative edge: the endpoints should be separated (E⁻⁻)
 
-A numpy array `assignment` of length `n_nodes` where `assignment[i]` is the integer cluster id of node `i`:
+Unlabeled pairs are zero-weight (E⁺ in the 3-label CC formulation) and
+contribute nothing to the cost.
+
+### 2.2 Clusterings and the CC cost
+
+A clustering is an integer array of length `n`:
 
 ```python
 assignment = np.array([0, 0, 1, 1, 2, 0])
 # node 0 → cluster 0, node 1 → cluster 0, node 2 → cluster 1, ...
 ```
 
-Cluster ids are arbitrary labels — `[0, 0, 1]` and `[5, 5, 9]` represent the same clustering.
+Cluster identifiers are arbitrary labels — `[0, 0, 1]` and `[5, 5, 9]`
+represent the same clustering.
 
-### What is "CC cost"?
-
-The number of edges the clustering *violates*:
-
-- a `'++'` edge whose endpoints are in *different* clusters (we wanted them together)
-- a `'--'` edge whose endpoints are in the *same* cluster (we wanted them apart)
-
-Implemented in [cc_core.py:108-122](cc_core.py#L108-L122):
+The correlation clustering cost of an assignment is the number of *violated*
+labeled edges: positive edges whose endpoints fall in different clusters,
+or negative edges whose endpoints fall in the same cluster. The
+implementation in [cc_core.py:108-122](cc_core.py#L108-L122):
 
 ```python
 def cc_cost(edges, assignment):
     cost = 0
-    for (i,j), label in edges.items():
+    for (i, j), label in edges.items():
         same = (assignment[i] == assignment[j])
-        if label == '--' and same:       cost += 1
+        if   label == '--' and     same: cost += 1
         elif label == '++' and not same: cost += 1
     return cost
 ```
 
-`norm_cost` divides by `|edges|` so it's always in [0, 1].
+The normalized cost `norm_cost` divides by `|edges|`, yielding a value in
+`[0, 1]`.
 
-### What is ARI (Adjusted Rand Index)?
+### 2.3 Adjusted Rand Index (ARI)
 
-ARI compares two clusterings to see how well they agree. We use it when we have *ground truth* labels (synthetic graphs and 20 Newsgroups). For two clusterings A and B of the same n nodes:
+The Adjusted Rand Index compares two clusterings of the same node set. It
+is used here whenever a ground-truth clustering is available — i.e., on the
+synthetic graphs and on 20 Newsgroups.
 
-1. Look at every pair of nodes (i, j).
-2. Count pairs that are "concordant" — either same-cluster in both A and B, or different-cluster in both.
-3. The **Rand Index** is `(concordant pairs) / (total pairs)`.
-4. **Adjusted Rand Index** subtracts the expected RI under random labeling, so ARI = 0 means "no better than chance" and ARI = 1 means "perfect agreement". ARI can be slightly negative if you're worse than chance.
+For two clusterings `A` and `B`:
 
-Why use ARI instead of cluster-label matching? Because clustering algorithms don't know the names of true classes — they just produce groupings. ARI is invariant to cluster relabeling.
+1. Enumerate every pair of nodes `(i, j)`.
+2. A pair is concordant if `A` and `B` agree on whether the two nodes are
+   co-clustered.
+3. The Rand Index is `(concordant pairs) / (total pairs)`.
+4. The Adjusted Rand Index subtracts the expected Rand Index under random
+   labeling. ARI = 1 indicates perfect agreement; ARI = 0 indicates chance
+   performance; ARI may take small negative values for worse-than-chance
+   clusterings.
 
-We get it from sklearn:
+The ARI is invariant to cluster relabeling, which is necessary because
+clustering algorithms produce groupings without naming them. The
+implementation used is `sklearn.metrics.adjusted_rand_score`.
+
+### 2.4 Cosine similarity and the threshold-based graph construction
+
+For two real-valued vectors `u, v`:
+
+$$\operatorname{cos\_sim}(u, v) = \frac{u \cdot v}{\|u\|\,\|v\|} \in [-1, 1].$$
+
+When both vectors are L2-normalized (placed on the unit sphere), this
+reduces to the dot product. All embeddings produced by the CL encoder are
+L2-normalized for this reason.
+
+20 Newsgroups is a corpus of text documents, not a graph. To produce a CC
+instance from it, the pipeline constructs a graph from the pairwise
+embedding similarities. For a chosen threshold θ ∈ (0, 1):
+
+1. Embed each document with `sentence-transformers/all-MiniLM-L6-v2`,
+   yielding L2-normalized 384-dimensional vectors.
+2. Compute the full pairwise similarity matrix `S[i, j] = cos_sim(doc_i, doc_j)`.
+3. Sort all upper-triangle pairs by descending similarity. The top θ
+   fraction are labeled E⁺⁺; the remaining 1 − θ are labeled E⁻⁻.
+
+The relevant construction is in
+[exp_real_data.py:564-575](exp_real_data.py#L564-L575):
 
 ```python
-from sklearn.metrics import adjusted_rand_score
-adjusted_rand_score(ground_truth_labels, our_predicted_assignment)
-```
-
-### What is "cosine similarity"?
-
-For two vectors $u, v$:
-
-$$\text{cos\_sim}(u, v) = \frac{u \cdot v}{\|u\| \cdot \|v\|} \in [-1, 1]$$
-
-If both vectors are L2-normalized (unit length), this simplifies to just the dot product `u·v`. Higher = more similar in direction. Used as the standard "how similar are these two embeddings" measure.
-
-### What is a "cosine similarity threshold" (the θ in 20news)?
-
-20 Newsgroups is not a graph — it's a collection of text documents. To run a *graph* algorithm on it, we have to *build* a graph. The recipe:
-
-1. Embed each document with sentence-transformers → 384-dim vector per document, L2-normalized.
-2. Compute the full pairwise similarity matrix `S[i, j] = cos_sim(doc_i, doc_j)` — a 400×400 matrix.
-3. Pick a threshold θ ∈ (0, 1). The top-θ fraction of pairs (by similarity) get the label `'++'`; the rest get `'--'`.
-
-So θ = 0.25 means: "the top 25% most-similar pairs are positive edges, the bottom 75% are negative edges". At θ = 0.75, three-quarters of all pairs become positive.
-
-In [exp_real_data.py:564-575](exp_real_data.py#L564-L575):
-
-```python
-upper = [(sims[i,j], i, j) for i in range(n) for j in range(i+1, n)]
-upper.sort(reverse=True)              # most-similar pairs first
-n_pos = int(theta * len(upper))       # how many get '++'
-pos_set = set((i,j) for _, i, j in upper[:n_pos])
+upper = [(sims[i, j], i, j) for i in range(n) for j in range(i+1, n)]
+upper.sort(reverse=True)
+n_pos = int(theta * len(upper))
+pos_set = set((i, j) for _, i, j in upper[:n_pos])
 
 edges = {}
 for _, i, j in upper:
-    edges[(i,j)] = '++' if (i,j) in pos_set else '--'
+    edges[(i, j)] = '++' if (i, j) in pos_set else '--'
 ```
 
-### What is "1-hop / 2-hop neighborhood"?
+The threshold θ controls how many pairs are positively labeled; varying θ
+changes the density of positive edges and, less directly, the rate of
+triadic-closure violations.
 
-For a node `v`, the **1-hop positive neighborhood** is "all nodes directly connected to `v` by a `'++'` edge":
+### 2.5 Positive 1- and 2-hop neighborhoods
 
-```python
-pos_nbrs[v] = {u : edges contains (u,v) with label '++'}
+For a node `v` in an edge dictionary, the **positive 1-hop neighborhood** is
+
+```text
+N⁺₁(v) = { u : (u, v) ∈ E⁺⁺ }.
 ```
 
-The **2-hop positive neighborhood** is "all nodes you can reach in two `'++'`-edge steps":
+The **positive 2-hop neighborhood** is the union of 1-hop neighborhoods of
+the 1-hop neighbors, with `v` removed:
 
-```python
-two_hop[v] = ⋃_{u ∈ pos_nbrs[v]} pos_nbrs[u]   minus v itself
+```text
+N⁺₂(v) = ⋃_{u ∈ N⁺₁(v)} N⁺₁(u)  \  {v}.
 ```
 
-If you think of `'++'` edges as "friendship", 1-hop = your friends, 2-hop = friends-of-friends. The CL model uses both as features (see §4.4).
+The CL feature constructor (Section 3.4.1) summarizes both
+neighborhoods. The 2-hop neighborhood is significant because triadic
+closure is a 2-hop property: if `u-v ∈ E⁺⁺` and `v-w ∈ E⁺⁺`, then TC asserts
+`u-w ∉ E⁻⁻`.
 
-## 4.2 What the two real datasets actually are
+---
 
-### Epinions
+## 3. Algorithms
 
-Epinions.com was a consumer review website that ran 2000–2014. The dataset on SNAP is a **trust network**:
+### 3.1 Pivot
 
-- **Nodes:** 131,828 users of the site.
-- **Edges:** 841,372 *directed* relationships. An edge `u → v` with sign `+1` means "user u marked user v as trusted"; sign `-1` means "user u marked user v as distrusted".
-- **Cleaning we apply:** drop self-loops (573 of them — user trusting themselves), drop pairs where `u → v = +1` but `v → u = -1` (2,703 of them — reciprocal disagreement, treated as no observation).
-- **No ground truth clustering.** There's no "true" partition of users into communities to compare against. So we only report CC cost on Epinions, not ARI.
-
-After cleaning, we symmetrize: for each pair, if any surviving directed edge is positive we call it `'++'`, otherwise `'--'`. This gives 711,210 undirected signed edges.
-
-We don't run on the *whole* 131k-node graph — too large for CL training. Instead we extract **ego-networks**: pick a high-degree user, take their 2-hop neighborhood (everyone within 2 hops of them in the *any-edge* graph), subsample to a target size if needed. Each ego-network becomes one independent CC problem instance.
-
-### 20 Newsgroups
-
-A classic NLP benchmark from the 1990s. ~11,000 short news articles (USENET posts) across 20 topic categories like `sci.med`, `comp.graphics`, `rec.sport.hockey`, `talk.politics.guns`, etc.
-
-- **Nodes:** documents (we sample 400 of them).
-- **Edges:** built from pairwise cosine similarity of document embeddings via the θ-threshold described above. There is no "natural" graph in this data — the graph is a *construction* we impose on top of the embedding space.
-- **Ground truth:** each document has a topic label, so we *can* compute ARI here.
-- **Cleaning we apply:** keep only documents that are single-topic, ≥50 chars long, in the top-10 most frequent classes (drops degenerate tail classes), random-sampled (not first-N).
-
-The reason we use 20news: it's a "real" dataset (not synthetic), but we can still vary the graph construction (via θ) to study how the algorithms respond. It's the closest real-data analog to varying ε in synthetic Exp 2.
-
-## 4.3 Walking through the baselines
-
-### Pivot — [cc_core.py:134-164](cc_core.py#L134-L164)
-
-The simplest CC algorithm. Random pivot:
+A classical randomized 3-approximation for correlation clustering
+(Ailon, Charikar, Newman 2008). Implementation:
+[cc_core.py:134-164](cc_core.py#L134-L164).
 
 ```python
 def pivot(n_nodes, edges, seed=None):
     pos_nbrs = defaultdict(set)
-    for (i,j), label in edges.items():
+    for (i, j), label in edges.items():
         if label == '++': pos_nbrs[i].add(j); pos_nbrs[j].add(i)
     remaining = set(range(n_nodes))
     order = list(range(n_nodes)); rng.shuffle(order)
@@ -281,17 +194,21 @@ def pivot(n_nodes, edges, seed=None):
     return assignment
 ```
 
-Walkthrough:
-1. Build a dictionary mapping each node to its positive neighbors.
-2. Walk through nodes in a random order.
-3. When we hit a still-unclustered node `v`, create a new cluster containing `v` and all of `v`'s positive neighbors that haven't been clustered yet.
-4. Remove all those nodes from `remaining` and increment the cluster id.
+Operation:
 
-That's the entire algorithm. It runs in O(|E|) time. It's a *3-approximation* — the resulting cost is at most 3× the optimal CC cost in expectation (Ailon-Charikar-Newman 2008).
+1. Build an adjacency map of positive neighbors.
+2. Traverse nodes in a uniformly random order.
+3. When a still-unclustered node `v` is encountered, form a new cluster
+   containing `v` and every positive neighbor of `v` that has not yet been
+   assigned.
 
-### Local Search — [cc_baselines.py:52-143](cc_baselines.py#L52-L143)
+The procedure runs in `O(|E|)` time and yields a clustering whose expected
+cost is at most three times the optimal correlation-clustering cost.
 
-Refines Pivot's output by trying single-node moves:
+### 3.2 Local Search
+
+A greedy refinement seeded from Pivot's output. Implementation:
+[cc_baselines.py:52-143](cc_baselines.py#L52-L143).
 
 ```python
 def local_search(n_nodes, edges, init_assignment, n_passes=15):
@@ -304,111 +221,110 @@ def local_search(n_nodes, edges, init_assignment, n_passes=15):
     for pass_num in range(n_passes):
         improved = False
         for v in range(n_nodes):
-            # Try moving v to: each cluster touching it, or its own singleton
-            # Keep the move if it lowers cost
+            # Try moving v to each adjacent cluster or to its own singleton;
+            # keep the move with the lowest local cost.
             ...
         if not improved: break
     return assignment
 ```
 
-The "local cost" of node `v` in cluster `c` (helper at [cc_baselines.py:30-50](cc_baselines.py#L30-L50)) is:
+The local cost contribution of node `v` in cluster `c`
+([cc_baselines.py:30-50](cc_baselines.py#L30-L50)) is
 
-`cost = (negative edges from v to nodes in c) − (positive edges from v to nodes in c)`
-
-Lower is better. The algorithm iterates: for each node, look at the clusters that any of its edges touch (plus a fresh singleton option), and move to whichever cluster minimizes that local cost. Repeat for up to 15 full passes or until nothing changes.
-
-Why it's strong:
-- Initialization from Pivot is already a 3-approximation.
-- Each local move can only decrease cost.
-- Convergence is guaranteed (cost is a non-negative integer, so it must stabilize).
-
-This is the *strongest* baseline in our experiments. It is not a published "approximation algorithm" — it's the obvious greedy local optimum.
-
-### MFP (Veldt's Match-Flip-Pivot) — [cc_baselines.py:149-227](cc_baselines.py#L149-L227)
-
-This is the one algorithm that explicitly uses **triadic closure** as preprocessing.
-
-Step 1 — find open wedges:
-
-```python
-def _build_open_wedges(n_nodes, edges):
-    # An open wedge is (i, k, j) where:
-    #   i-k is ++,  k-j is ++,  but  i-j is NOT ++
-    # i.e., a TC-violating triangle, almost
+```text
+local_cost(v, c) = |{u ∈ E⁻⁻ neighbors of v : assignment[u] = c}|
+                 − |{u ∈ E⁺⁺ neighbors of v : assignment[u] = c}|.
 ```
 
-Step 2 — greedy matching:
+At each pass, every node is offered the option of moving to any cluster
+that touches it via a labeled edge, or of forming a fresh singleton. Moves
+that strictly decrease the local cost are accepted. The procedure halts
+either after `n_passes = 15` full sweeps or when no node moves in a full
+pass. Convergence is guaranteed because the cost is a non-negative integer
+and each accepted move strictly decreases it.
 
-```python
-used_pairs = set()
-matched_wedges = []
-for (i, k, j) in shuffled_wedges:
-    if no pair of (i,k), (k,j), (i,j) is used:
-        accept this wedge
-        mark all three pairs used
-```
+This is the strongest baseline in the experiments. It is not a published
+approximation algorithm — it is the natural greedy local optimum and is
+included as a reference for what aggressive combinatorial search can
+achieve.
 
-Step 3 — flip:
+### 3.3 Match-Flip-Pivot (MFP)
+
+Veldt's algorithm (ICML 2022) is the one baseline that *explicitly* uses
+triadic closure as a preprocessing step. Implementation:
+[cc_baselines.py:149-227](cc_baselines.py#L149-L227).
+
+**Step 1.** Enumerate open wedges in the positive subgraph. A wedge `(i, k, j)`
+is *open* when `i-k ∈ E⁺⁺`, `k-j ∈ E⁺⁺`, and `i-j ∉ E⁺⁺`. An open wedge is
+precisely a site of strong-triadic-closure violation.
+
+**Step 2.** Construct a greedy maximal matching over open wedges. Wedges are
+visited in a uniformly random order, and a wedge is accepted only if none
+of its three node-pairs is already used by a previously accepted wedge.
+
+**Step 3.** Close the matched wedges by inserting (or flipping to) `'++'` on
+the edge `(i, j)` of each matched wedge:
 
 ```python
 for (i, k, j) in matched_wedges:
-    modified_edges[(min(i,j), max(i,j))] = '++'
-    # We force i-j to be positive, closing the open wedge
+    modified_edges[(min(i, j), max(i, j))] = '++'
 ```
 
-Step 4 — run Pivot on the modified graph.
+**Step 4.** Run Pivot on the modified edge set.
 
-The intuition: TC says that for every wedge `i-k-j` with both arms positive, the closing edge `i-j` *should* be positive. If it isn't (open wedge), we have a TC violation. MFP fixes a maximal matching of these violations before running Pivot. Veldt proves this achieves a ~2-approximation in practice (theoretical 6-approximation).
+The matching step yields a lower-bound certificate for MINSTC+ (the
+minimum number of edge flips required to satisfy strong triadic closure).
+Veldt proves a theoretical 6-approximation for cluster editing; in practice
+the algorithm achieves approximation ratios near 2.
 
-### CL — covered in §4.4 below
+### 3.4 Contrastive Learning
 
-## 4.4 Walking through the contrastive-learning model
+The CL pipeline has four components: a feature constructor, a 3-layer MLP
+encoder, the NT-Xent contrastive loss, and a k-means readout.
 
-This is the most involved piece. Three sub-components: features, MLP, NT-Xent loss.
+#### 3.4.1 Two-hop feature construction
 
-### Step 1: build_features — [cc_core.py:170-232](cc_core.py#L170-L232)
-
-For each node `v`, we produce a feature vector. The vector has two parts: a 1-hop summary and a 2-hop summary.
+The CC problem provides no node features, only signed edges. The feature
+constructor in [cc_core.py:170-232](cc_core.py#L170-L232) builds a per-node
+vector by combining a random per-node "identity" projection with averages
+over the positive 1- and 2-hop neighborhoods.
 
 ```python
 def build_features(n_nodes, edges, feat_dim, seed=42):
     rng = np.random.default_rng(seed)
-    proj = rng.standard_normal((n_nodes, feat_dim))   # random projection per node
-    pos_nbrs = defaultdict(list); neg_nbrs = defaultdict(list)
+    proj = rng.standard_normal((n_nodes, feat_dim))   # random per-node identity
     # ... build positive and negative adjacency lists ...
+
+    F1 = np.zeros((n_nodes, 2 + feat_dim))
+    for v in range(n_nodes):
+        F1[v, 0] = len(pos_nbrs[v]) / max_pos        # normalized positive degree
+        F1[v, 1] = len(neg_nbrs[v]) / max_neg        # normalized negative degree
+        if pos_nbrs[v]:
+            F1[v, 2:] = proj[pos_nbrs[v]].mean(axis=0)   # avg pos-neighbor projection
+
+    F2 = np.zeros_like(F1)
+    for v in range(n_nodes):
+        two_hop = set()
+        for u in pos_nbrs[v]: two_hop.update(pos_nbrs[u])
+        two_hop.discard(v)
+        if two_hop: F2[v] = F1[list(two_hop)].mean(axis=0)
 ```
 
-Why a random projection? We have no node features in CC (just edges). So we assign each node a random vector — this is the "identity" of the node in feature space. It's like a positional encoding.
+`F1[v]` summarizes the 1-hop positive neighborhood; `F2[v]` averages `F1`
+over the 2-hop positive neighbors. The final feature is the concatenation
+`[F1, F2]`, a `2·(2 + feat_dim)`-dimensional vector per node.
 
-```python
-F1 = np.zeros((n_nodes, 2 + feat_dim))
-for v in range(n_nodes):
-    F1[v, 0] = len(pos_nbrs[v]) / max_pos      # normalized positive degree
-    F1[v, 1] = len(neg_nbrs[v]) / max_neg      # normalized negative degree
-    if pos_nbrs[v]:
-        F1[v, 2:] = proj[pos_nbrs[v]].mean(axis=0)   # avg of pos neighbors' random vecs
-```
+Because the construction averages over 2-hop positive neighbors, the
+feature already encodes the triadic-closure assumption. This is the
+mechanism by which CL is sensitive to TC violation: when TC is violated,
+the 2-hop average contains labels that contradict the supervised signal
+provided by the loss.
 
-So F1[v] is `[pos_deg, neg_deg, avg_random_vec_of_pos_neighbors]`. This is the 1-hop summary.
+#### 3.4.2 MLP encoder
 
-```python
-F2 = np.zeros_like(F1)
-for v in range(n_nodes):
-    two_hop = set()
-    for u in pos_nbrs[v]: two_hop.update(pos_nbrs[u])
-    two_hop.discard(v)
-    if two_hop: F2[v] = F1[list(two_hop)].mean(axis=0)
-```
-
-F2[v] is the average of F1 over `v`'s 2-hop positive neighbors (friends-of-friends). This is the 2-hop summary.
-
-The final feature is `[F1, F2]` concatenated — a `(2 + feat_dim) * 2`-dimensional vector per node.
-
-Why 2-hop? Because triadic closure is fundamentally a 2-hop property — if `u-v` and `v-w` are both `'++'`, then `u` and `w` should be similar. By aggregating over 2-hop neighbors, the feature already encodes the TC assumption. **This is why the synthetic Exp 2 collapse happens precisely when TC is violated: the features are inconsistent with the labels.**
-
-### Step 2: the MLP — [cc_core.py:252-310](cc_core.py#L252-L310)
-
-A 3-layer feed-forward neural net, hand-implemented in numpy (no PyTorch needed):
+A 3-layer feed-forward network with ReLU activations and L2-normalized
+output. Implemented in numpy with manual backpropagation at
+[cc_core.py:252-310](cc_core.py#L252-L310).
 
 ```python
 class MLP:
@@ -422,46 +338,55 @@ class MLP:
         z = l2_normalize(h3)
         return z
     def bwd(self, dz, lr):
-        # Manual backprop, then SGD update
+        # Manual backprop; SGD update
 ```
 
-Output `z` is L2-normalized — every embedding lives on the unit sphere. This is standard for contrastive learning because it makes the cosine similarity equal to the dot product.
+The output `z` is L2-normalized so that every embedding lies on the unit
+hypersphere. With unit-norm embeddings the cosine similarity equals the
+dot product, which the NT-Xent loss exploits.
 
-### Step 3: NT-Xent loss — [cc_core.py:317-378](cc_core.py#L317-L378)
+#### 3.4.3 NT-Xent loss
 
-Normalized Temperature-scaled Cross-Entropy. For an anchor node `i` with a positive partner `j` (a `'++'` edge), and a set of negative partners `N_i`:
+Normalized temperature-scaled cross-entropy. For an anchor node `i` with a
+positive partner `j` (a node such that `(i, j) ∈ E⁺⁺`) and a set of
+negative partners `N_i`:
 
-$$\mathcal{L}_i = -\log \frac{\exp(z_i \cdot z_j / \tau)}{\exp(z_i \cdot z_j / \tau) + \sum_{k \in N_i} \exp(z_i \cdot z_k / \tau)}$$
+$$\mathcal{L}_i = -\log \frac{\exp(z_i \cdot z_j / \tau)}{\exp(z_i \cdot z_j / \tau) + \sum_{k \in N_i} \exp(z_i \cdot z_k / \tau)}.$$
 
-In words: the probability mass should concentrate on the positive partner relative to the negatives. Vectorized in code:
+Vectorized implementation at
+[cc_core.py:317-378](cc_core.py#L317-L378):
 
 ```python
 def nt_xent_vectorized(z, pos_idx, neg_idx, T=0.5):
     Za = z[anchors]; Zp = z[partners]; Zn = z[negatives]
     sp = (Za * Zp).sum(1) / T       # anchor·positive similarities
     sn = Za @ Zn.T / T              # anchor·negative similarities
-    # Log-sum-exp trick for numerical stability:
     all_s = concat([sp, sn], axis=1)
     ld = logsumexp(all_s, axis=1)
     loss = -(sp - ld).mean()
-    # ... compute gradient w.r.t. z manually ...
+    # ... gradient w.r.t. z computed analytically ...
 ```
 
-The proved proposition (in [proposition.pdf](proposition.pdf)) bounds the gap between positive and mean negative similarity in terms of this loss — that's the formal link to CC.
+The log-sum-exp trick is used for numerical stability, and the gradient is
+computed analytically rather than via autograd. The proposition in
+`docs/proposition.pdf` bounds the gap between positive-pair similarity and
+mean negative similarity in terms of this loss, providing the formal link
+between NT-Xent minimization and the continuous CC relaxation.
 
-### Step 4: train_cl — [cc_core.py:385-428](cc_core.py#L385-L428)
+#### 3.4.4 Training driver and k-means readout
 
-Putting it together:
+The training driver at [cc_core.py:385-428](cc_core.py#L385-L428) ties the
+pieces together:
 
 ```python
 def train_cl(n_nodes, edges, k, n_epochs=150, ...):
-    feat_dim = k * 4    # ← here's the k-scaling
+    feat_dim = k * 4
     d_h      = k * 8
     d_out    = k * 4
 
     X = build_features(n_nodes, edges, feat_dim=feat_dim, ...)
-    pos = [(i,j) for ... if label == '++']
-    neg = [(i,j) for ... if label == '--']
+    pos = [(i, j) for ... if label == '++']
+    neg = [(i, j) for ... if label == '--']
     if len(neg) > 400: neg = rng.sample(neg, 400)   # subsample for speed
 
     model = MLP(X.shape[1], d_h, d_out, ...)
@@ -472,126 +397,183 @@ def train_cl(n_nodes, edges, k, n_epochs=150, ...):
     return model.fwd(X)
 ```
 
-Output is an `(n_nodes, 4k)` embedding matrix. We then call `cluster_emb` ([cc_core.py:434](cc_core.py#L434)) which is one line:
+The output is an `(n_nodes, 4k)` embedding matrix. The discrete clustering
+is then obtained by k-means at [cc_core.py:434](cc_core.py#L434):
 
 ```python
 def cluster_emb(emb, k, seed=42):
     return KMeans(n_clusters=k, random_state=seed, n_init=10).fit_predict(emb)
 ```
 
-## 4.5 Why dimensions scale with k (the spectral clustering principle)
+`n_init=10` runs k-means ten times with different random initializations and
+returns the solution with the lowest inertia.
 
-The intuition comes from **spectral clustering**. To separate `k` clusters with a linear method (like k-means, which uses hyperplanes), you need at least `k − 1` independent directions in embedding space. Concretely:
+---
 
-- If your output is 1-dimensional, k-means can only carve out 2 clusters (split the line at one point) — so output_dim ≥ 2 for k = 2.
-- If your output is 2-dimensional, k-means can carve out at most ~3-4 clusters cleanly.
-- In general, you need output_dim ≥ k for k-means to have enough room.
+## 4. Datasets
 
-Spectral clustering takes this seriously: it uses exactly the `k` smallest non-trivial eigenvectors of the Laplacian. We do something looser but in the same spirit: scale output_dim with `k` so the model has at least linear capacity in the number of clusters.
+### 4.1 Epinions signed network
 
-In our code:
-- `feat_dim = 4k` — the random-projection feature dimension
-- `d_h = 8k` — the hidden layer dimension (2× the output to give it some compression capacity)
-- `d_out = 4k` — the embedding output dimension (4× safety margin over the theoretical minimum k)
+Epinions.com was a consumer-review website (2000–2014). The version of the
+dataset distributed by SNAP is a directed signed trust network:
 
-We pick `4k` as the safety multiplier — empirically it works well across the synthetic experiments without being unnecessarily large.
+- 131,828 users (nodes)
+- 841,372 directed signed relationships. Each edge `u → v` is labeled
+  `+1` (user `u` marked `v` as trusted) or `-1` (user `u` marked `v` as
+  distrusted).
 
-## 4.6 Why we need k-clustering at all
+The dataset has no ground-truth clustering, so on Epinions only CC cost is
+reported; ARI is not defined here.
 
-This is a subtle point. CL produces **continuous embeddings** — a vector per node. But CC needs a **discrete partition** — an integer cluster id per node.
+Cleaning steps applied (see Section 6 for details):
 
-So we need a *readout step* that converts embeddings to a partition. k-means is the standard choice because:
+- 573 self-loops dropped.
+- 2,703 pairs with reciprocal sign disagreement (`u → v = +1`,
+  `v → u = -1`) dropped.
 
-1. It directly matches the CL objective. NT-Xent encourages within-cluster compactness and between-cluster separation — exactly what k-means optimizes (Euclidean within-cluster variance under a partition).
-2. It's simple and fast — single-pass on small embeddings.
-3. It needs to know `k`, the number of clusters. This is the **k-selection problem** that bit us on Epinions.
+The remaining directed edges are symmetrized: pairs with at least one
+positive direction (and no disagreement) become `'++'`; all others
+`'--'`. Symmetrization yields 711,210 undirected signed edges.
 
-Alternatives we could swap in (and may discuss in the paper as future work):
-- Hierarchical clustering — produces a tree, no need to fix `k` upfront, but needs a cut criterion.
-- DBSCAN — density-based, finds singletons naturally, but has its own hyperparameters.
-- Spectral clustering on the similarity matrix of embeddings — overlaps with what we already have.
+Because the full graph is too large for full-graph CL training, the
+experiment extracts 2-hop ego-networks around high-degree nodes. Each
+ego-network is treated as one independent CC instance.
 
-We stuck with k-means because it's the most common readout in self-supervised representation learning. The honest caveat in the paper is that *the CL pipeline includes a readout step that needs k*, while combinatorial methods (Pivot, LS, MFP) don't.
+### 4.2 20 Newsgroups
 
-## 4.7 The cleaning process, line by line
+A canonical text-classification benchmark, distributed with scikit-learn:
+roughly 11,000 short USENET posts across 20 topic categories
+(`sci.med`, `comp.graphics`, `rec.sport.hockey`, etc.).
 
-Three bugs in the original SNAP pipeline. Here's what was wrong and what we changed.
+For this study:
 
-### Bug 1: self-loops were kept
+- Nodes are documents (400 are sampled).
+- Edges are induced by the cosine-similarity threshold construction
+  described in Section 2.4. The graph is not an intrinsic property of the
+  dataset; it is a function of the embedding model and the threshold θ.
+- Ground truth is the document's topic label, so ARI is meaningful here.
 
-**Before** — [exp_real_data.py load_snap_signed](exp_real_data.py#L70) original version:
+Cleaning steps applied (see Section 6):
 
-```python
-for line in f:
-    parts = line.split()
-    u, v, s = int(parts[0]), int(parts[1]), int(parts[2])
-    directed_edges[(u, v)] = s        # ← keeps u == v
+- Keep only single-topic documents.
+- Retain only the top-10 most frequent classes (drops degenerate tail
+  classes with very few documents).
+- Drop documents shorter than 50 characters.
+- Random subsample (seeded) to `max_docs`, instead of taking the first N
+  documents in the dataset order.
+
+The role of 20 Newsgroups in the study is as a real-data analog to the
+synthetic Experiment 2 (TC-violation sweep): varying θ changes the
+graph construction and induces a range of TC-violation rates and positive-
+edge densities, allowing a sensitivity analysis on a non-synthetic dataset.
+
+---
+
+## 5. Implementation choices
+
+### 5.1 Dimensions scale with k
+
+The CL encoder uses dimensions that scale with the number of clusters `k`:
+
+```text
+feat_dim = 4·k     (random-projection feature dimension)
+d_h      = 8·k     (MLP hidden width)
+d_out    = 4·k     (embedding output dimension)
 ```
 
-A self-loop is an edge `(u, u)` meaning "user trusts themselves." In a CC problem this is meaningless. Epinions had 573 of these.
+The rationale is the spectral-clustering principle that separating `k`
+clusters with a linear partitioning (such as k-means) requires at least
+`k − 1` independent directions in embedding space. Spectral clustering
+makes this exact: it uses the `k` smallest non-trivial eigenvectors of the
+graph Laplacian. The CL pipeline uses a looser version of the same idea:
+scale the output dimension with `k` so the encoder has at least linear
+representational capacity in the number of clusters. The multiplier 4 is
+empirical and provides a comfortable margin without inflating compute.
 
-**After:**
+### 5.2 k-means as readout
+
+The CL encoder produces continuous embeddings, whereas the CC objective
+requires a discrete partition. A readout step is therefore required.
+k-means is the natural choice here:
+
+1. The NT-Xent loss encourages within-cluster compactness and
+   between-cluster separation in embedding space, which is exactly what
+   k-means optimizes (Euclidean within-cluster variance under a partition).
+2. It is fast and deterministic up to initialization.
+3. It requires an explicit `k`.
+
+The dependency on `k` is the main limitation of this readout. Pivot, Local
+Search, and MFP infer their own cluster count from the graph structure; CL
+must be told. Section 6.2 describes the k-sweep policy used to make the
+comparison fair on signed-network data. Alternative readouts (hierarchical
+clustering, DBSCAN, spectral clustering on the embedding similarity matrix)
+remain plausible but are not used in the experiments reported here.
+
+---
+
+## 6. Real-data cleaning
+
+The first attempt at running the SNAP signed-network experiments produced
+misleading results that traced to data-cleaning issues rather than
+algorithmic ones. This section documents the cleaning policy applied to
+fix those issues, with code references and quantitative effect.
+
+### 6.1 Self-loops in SNAP signed networks
+
+The original loader at
+[exp_real_data.py:70](exp_real_data.py#L70) accepts every line in the SNAP
+file. The corrected loader skips self-loops:
 
 ```python
 if u == v:
     self_loops += 1
-    continue                          # skip self-loops
+    continue
 directed_edges[(u, v)] = s
 ```
 
-### Bug 2: reciprocal sign disagreement collapsed arbitrarily
+Effect on Epinions: 573 self-loops dropped.
 
-In a directed signed graph, you can have `u → v = +1` (u trusts v) and `v → u = -1` (v distrusts u). When we symmetrize to undirected, what should the pair (u, v) be?
+### 6.2 Reciprocal sign disagreement in symmetrization
 
-**Before** — [symmetrize](exp_real_data.py#L110) original:
+The directed SNAP data contains pairs `(u, v)` with `u → v = +1` and
+`v → u = -1`. Symmetrization must choose a policy for these cases. The
+original code at [exp_real_data.py:110](exp_real_data.py#L110) used a sign-
+sum heuristic that arbitrarily assigned the pair to `'--'`:
 
 ```python
 label = '++' if sum(signs) > 0 else '--'
 ```
 
-If `signs = [+1, -1]`, the sum is 0, which is `not > 0`, so it becomes `'--'`. This is arbitrary — equally many arguments for `'++'`. Epinions had 2,703 such pairs.
-
-**After:**
+The corrected version drops disagreeing pairs entirely, treating them as
+unobserved (E⁺ zero-weight in the 3-label formulation):
 
 ```python
 pos = sum(1 for x in signs if x > 0)
 neg = sum(1 for x in signs if x < 0)
 if pos > 0 and neg > 0:
     dropped_disagreement += 1
-    continue                          # drop the pair entirely
+    continue
 edges[(i, j)] = '++' if pos > 0 else '--'
 ```
 
-Pairs with conflicting evidence are dropped, treated as no observation (`E+` zero-weight). The CC formulation supports this naturally — only labeled edges contribute to cost.
+Effect on Epinions: 2,703 pairs dropped.
 
-### Bug 3: ego-network subsampling produced fake singletons
+### 6.3 Ego-network subsampling artifacts
 
-This was the big one. The original code:
+The most consequential issue concerned ego-network extraction. The original
+code performed a 2-hop BFS from a chosen center, subsampled uniformly to
+the target size, and indexed the kept nodes. Two problems followed:
 
-```python
-def extract_ego_network(center_node, edges, n_nodes, hop=2, max_size=500, seed=42):
-    # BFS up to 2 hops from center
-    visited = {center_node}; frontier = {center_node}
-    for _ in range(hop):
-        # ... expand frontier ...
+1. **The center could be dropped.** `rng.sample(visited, max_size)` is
+   uniform over `visited`, with no guarantee of retaining the center node.
+2. **Subsampled fringe nodes became forced singletons.** A 2-hop BFS from a
+   high-degree center fans out to tens of thousands of nodes. Uniformly
+   subsampling to 500 retains predominantly 2-hop-fringe nodes whose
+   incident edges lead to *other* fringe nodes not kept by the sample, so
+   the kept subgraph contains many degree-zero nodes.
 
-    # Subsample if too large
-    nodes = list(visited)
-    if len(nodes) > max_size:
-        nodes = rng.sample(nodes, max_size)    # ← can drop the center!
-    nodes = sorted(nodes)
-    # Build sub_edges keeping only edges where both endpoints are in nodes
-```
-
-Two problems with this:
-
-(a) **Center can be dropped.** `rng.sample(visited, max_size)` is a uniform random sample — there's no guarantee the center node ends up in it. So our "ego-network around node 25" might end up not containing node 25.
-
-(b) **Fringe nodes become forced singletons.** A 2-hop BFS from a high-degree center can fan out to *tens of thousands* of nodes (these social networks have high mixing). When we subsample down to 500, most of the 500 are 2-hop-fringe nodes whose edges go to *other* fringe nodes that weren't sampled. So in the kept subgraph, they have **degree 0**. They appear in the node list but they're disconnected.
-
-This wrecked CL because k-means on n=500 nodes where 400 of them are isolated singletons has nothing to learn from. And it inflated the apparent "cluster count" (lots of disconnected components are 1-node singletons), which made our `k_est = #positive-components` heuristic absurdly large.
-
-**After:**
+The corrected ego-net extractor always retains the center, then drops any
+node with degree zero in the kept subgraph:
 
 ```python
 # Always keep the center
@@ -601,44 +583,92 @@ if len(nodes) > max_size:
     sampled = rng.sample(others, max_size - 1)
     nodes = [center_node] + sampled
 
-# Build edges in the kept set, count degree, drop deg-0 nodes
+# Drop nodes with degree zero in the kept subgraph
 node_set = set(nodes)
 kept_edges = {}; sub_deg = defaultdict(int)
 for (i, j), label in edges.items():
     if i in node_set and j in node_set:
         kept_edges[(i, j)] = label
         sub_deg[i] += 1; sub_deg[j] += 1
-nodes = sorted(v for v in nodes if sub_deg[v] > 0)    # drop deg-0
+nodes = sorted(v for v in nodes if sub_deg[v] > 0)
 ```
 
-What this does:
+Effect on Epinions: on six representative high-degree centers at raw target
+size n = 200, the cleaned subgraphs contained ≈ 20–25 nodes (roughly 80% of
+the original "nodes" were sampling artifacts), and the resulting graph
+density increased by approximately two orders of magnitude.
 
-1. Explicitly include the center in the sample, then random-sample the rest.
-2. After sampling, count each node's degree in the **kept subgraph** (not the full graph).
-3. Drop any node with zero edges in the kept subgraph — these are sampling artifacts.
+### 6.4 CL k-selection on real signed networks
 
-The effect on Epinions, on the same six ego-networks: original n = 200 became cleaned n ≈ 20–25 (the rest were fringe singletons). Density went up by ~100×. The graphs became actual graphs instead of "one center + dust."
+The original code passed `k_est = min(#positive-components, n // 5)` to the
+k-means readout. On Epinions ego-networks this produced `k` values between
+40 and 500, but the CC-cost-optimal cluster count on these graphs is `k = 2`
+(one trust circle plus singletons).
 
-### Bug 4 (not really a bug, more a bad heuristic): CL's k was the wrong number
+Pivot, Local Search, and MFP infer their own cluster count from the graph
+structure. To make the comparison fair, the corrected `run_one` in
+[exp_real_data.py](exp_real_data.py) sweeps CL across a small grid
+`k ∈ {2, 5, 10, k_est}` and returns the assignment with the lowest CC cost.
+The chosen `k` is logged on every run. On cleaned Epinions ego-networks
+the selected `k` is consistently 2.
 
-The original code passed `k_est = min(#positive-components, n // 5)` to k-means. On Epinions ego-networks, that meant k = 40 to 500. But the CC-cost-optimal number of clusters on these graphs is k = 2.
+### 6.5 20 Newsgroups cleaning
 
-We added a k-sweep: try CL at k ∈ {2, 5, 10, k_est} and return the assignment with lowest CC cost. Pivot/LS/MFP choose their own k from the graph structure, so letting CL do the same (over a small grid) is the fair analog.
+Four policies are applied:
 
-The chosen k is logged on every run — on Epinions it picks k = 2 every single time.
+- Single-topic documents only (multi-label documents would contaminate ARI).
+- Retain only the top-10 most frequent classes.
+- Drop documents shorter than 50 characters.
+- Random subsample (seeded) to `max_docs = 400`.
 
-### Cleaning summary table
+These steps produce a balanced experimental setup with 10 well-populated
+classes (typical class sizes 31–47 documents at `max_docs = 400`).
 
-| Bug | Where | Effect on Epinions | Fix |
+### 6.6 Summary of cleaning steps
+
+| Step | Location | Effect on Epinions | Action |
 |---|---|---|---|
 | Self-loops kept | `load_snap_signed` | 573 spurious edges | Skip `u == v` lines |
 | Sign disagreement collapsed | `symmetrize` | 2,703 arbitrary labels | Drop disagreeing pairs |
-| Center could be dropped | `extract_ego_network` | "ego-net" might not contain ego | Always include center |
-| Deg-0 nodes kept | `extract_ego_network` | ~80% of subgraph was singletons | Drop deg-0 after subsampling |
-| `k_est` too large for CL | `run_one` | CL forced into bad partitions | Sweep `k ∈ {2, 5, 10, k_est}`, report best |
+| Center could be dropped | `extract_ego_network` | Center not guaranteed in sample | Always include center |
+| Degree-zero nodes kept | `extract_ego_network` | ~80% sampling artifacts | Drop degree-zero nodes |
+| `k_est` too large for CL | `run_one` | CL forced into degenerate partitions | Sweep `k ∈ {2, 5, 10, k_est}`, report best |
 
-After all five fixes, Epinions results match the synthetic Exp 1 prediction: CL becomes the second-best method on average, beating Pivot and MFP, approaching LS.
+After these corrections, the cleaned Epinions results align with the
+synthetic Experiment 1 prediction: CL is the second-best method on average,
+beats Pivot and MFP across all subgraph sizes, and approaches Local Search.
 
-## 4.8 If you have 30 more seconds, the headline
+---
 
-The synthetic story (proposition + Exp 1/2/3) says: **CL is implicitly solving CC under a triadic-closure assumption**. The real-data story (cleaned Epinions, 20news) says: **when TC actually holds on real data, the synthetic prediction is borne out**. The work is a *characterization* of when contrastive learning succeeds, not a performance claim that CL beats classical CC algorithms — Local Search remains the strongest method on every dataset.
+## 7. Repository layout
+
+| File | Purpose |
+|---|---|
+| [cc_core.py](cc_core.py) | Library: graph generation, Pivot, CL model (features + MLP + NT-Xent + training), k-means readout |
+| [cc_baselines.py](cc_baselines.py) | Library: Local Search and Veldt MFP |
+| [exp_synthetic.py](exp_synthetic.py) | Unified runner for synthetic Experiments 1–4 |
+| [exp_purity.py](exp_purity.py) | Controlled-purity variant of Experiment 3 |
+| [exp_real_data.py](exp_real_data.py) | SNAP (Epinions, Slashdot) and 20 Newsgroups experiments, with cleaning |
+| [diagnose_signed_subgraph.py](diagnose_signed_subgraph.py) | Per-ego-net structural diagnostic: density, component-size, k-sweep |
+| [docs/proposition.pdf](docs/proposition.pdf) | Formal statement and proof of the NT-Xent ↔ CC bound |
+| [docs/session_report.tex](docs/session_report.tex) / [docs/session_report.pdf](docs/session_report.pdf) | Writeup of the cleaning iteration and real-data findings |
+| [results/](results/) | Output figures and `.npy` result arrays |
+
+---
+
+## 8. Headline finding
+
+The synthetic experiments (proposition + Experiments 1, 2, 3) establish
+that CL is implicitly solving correlation clustering under a triadic-
+closure assumption. The real-data experiments confirm that, on cleaned
+Epinions ego-networks where TC essentially holds, the synthetic prediction
+is borne out: CL is consistently the second-best method, ahead of Pivot and
+MFP and within a small margin of Local Search. The 20 Newsgroups threshold
+sweep provides a complementary sensitivity analysis on text data,
+demonstrating that CL degrades smoothly as the graph construction departs
+from the regime that respects the underlying class structure.
+
+Local Search remains the strongest method overall on every dataset. The
+contribution of this work is therefore a *characterization* of when and why
+CL succeeds, not a performance claim that CL outperforms classical CC
+algorithms.
