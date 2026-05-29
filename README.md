@@ -1,7 +1,7 @@
 # Contrastive Learning as an Implicit Solver for Correlation Clustering
 
 Code accompanying the paper *Contrastive Learning as an Implicit Solver for
-Correlation Clustering* (target venue: ICLR 2027).
+Correlation Clustering*.
 
 The repo studies the structural link between the **NT-Xent contrastive loss**
 (SimCLR-style) and the **correlation clustering (CC) objective**. The central
